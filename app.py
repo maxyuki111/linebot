@@ -1,3 +1,4 @@
+import logging
 import os
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
@@ -10,6 +11,8 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 import anthropic
 
 app = Flask(__name__)
+# Renderのログに例外が出るようにする（gunicornは標準エラー出力を拾う）。
+logging.basicConfig(level=logging.INFO)
 
 configuration = Configuration(access_token=os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
 handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
@@ -138,42 +141,64 @@ Gタイプ：「G-fast設備で通常の6倍664M対応なのでかなり速く�
 回答は短く、現場で即使えるトークを中心に答えてください。"""
 
 
+# 起動確認とスリープ防止の定期アクセス用。ここが200を返すことで、
+# 外部の定期実行サービスからサーバーを起こし続けられる。
+@app.route("/", methods=["GET", "HEAD"])
+@app.route("/healthz", methods=["GET", "HEAD"])
+def healthz():
+    return "ok", 200
+
+
 @app.route("/callback", methods=["POST"])
 def callback():
-  signature = request.headers.get("X-Line-Signature", "")
-  body = request.get_data(as_text=True)
-  try:
-      handler.handle(body, signature)
-  except InvalidSignatureError:
-      abort(400)
-  except Exception:
-      pass
-  return "OK"
+    signature = request.headers.get("X-Line-Signature", "")
+    body = request.get_data(as_text=True)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    except Exception:
+        # 握りつぶすと原因が一切分からなくなるので、必ずログに残す。
+        # LINEには200を返す（エラーを返すと配信が止められるため）。
+        app.logger.exception("webhook handling failed")
+    return "OK"
 
 
+def reply(reply_token, text):
+    with ApiClient(configuration) as api_client:
+        MessagingApi(api_client).reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text=text)],
+            )
+        )
 
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_message = event.message.text
 
-    response = claude.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}]
-    )
-
-    reply_text = response.content[0].text
-
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)]
-            )
+    try:
+        response = claude.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
         )
+        reply_text = response.content[0].text
+    except Exception:
+        # 無言で終わるのが一番困るので、必ず何か返す。
+        app.logger.exception("claude call failed")
+        reply_text = (
+            "すみません、いま応答を作れませんでした。"
+            "少し時間をおいて、もう一度送ってください。"
+        )
+
+    try:
+        reply(event.reply_token, reply_text)
+    except Exception:
+        # 返信チケットの期限切れなど。ここで落ちても他の処理は続ける。
+        app.logger.exception("line reply failed")
 
 
 if __name__ == "__main__":
