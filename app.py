@@ -179,13 +179,22 @@ def handle_message(event):
     user_message = event.message.text
 
     try:
-        response = claude.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
+        response = claude.beta.messages.create(
+            model="claude-opus-5",
+            max_tokens=4096,
             system=SYSTEM_PROMPT,
+            output_config={"effort": "low"},
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
             messages=[{"role": "user", "content": user_message}],
         )
-        reply_text = response.content[0].text
+        if response.stop_reason == "refusal":
+            reply_text = (
+                "すみません、その内容にはお答えできませんでした。"
+                "別の聞き方で試してください。"
+            )
+        else:
+            reply_text = response.content[0].text
     except Exception:
         # 無言で終わるのが一番困るので、必ず何か返す。
         app.logger.exception("claude call failed")
