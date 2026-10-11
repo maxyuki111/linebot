@@ -194,7 +194,8 @@ def handle_message(event):
                 "別の聞き方で試してください。"
             )
         else:
-            reply_text = response.content[0].text
+            # thinkingブロックが先頭に来るので、textブロックだけを取り出す
+            reply_text = next(b.text for b in response.content if b.type == "text")
     except Exception:
         # 無言で終わるのが一番困るので、必ず何か返す。
         app.logger.exception("claude call failed")
